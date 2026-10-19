@@ -646,6 +646,8 @@ impl TextSpan {
 pub enum TextSpanImageAlign {
     Left,
     Right,
+    /// Scaleform GFx's own value: the image sits in the line on the text baseline.
+    Baseline,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1031,6 +1033,8 @@ impl FormatSpans {
                                     align: image_attribute(b"align").map(|value| {
                                         if &value == b"right" {
                                             TextSpanImageAlign::Right
+                                        } else if &value == b"baseline" {
+                                            TextSpanImageAlign::Baseline
                                         } else {
                                             TextSpanImageAlign::Left
                                         }
@@ -1966,6 +1970,7 @@ impl<'a> FormatState<'a> {
                 match align {
                     TextSpanImageAlign::Left => "left",
                     TextSpanImageAlign::Right => "right",
+                    TextSpanImageAlign::Baseline => "baseline",
                 }
             );
         }

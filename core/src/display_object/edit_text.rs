@@ -10,6 +10,7 @@ use crate::avm2::object::{
 };
 use crate::avm2::{Activation as Avm2Activation, Avm2};
 use crate::backend::ui::MouseCursor;
+use crate::character::BitmapCharacter;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::interactive::{
     InteractiveObject, InteractiveObjectBase, TInteractiveObject,
@@ -38,6 +39,7 @@ use gc_arena::lock::{Lock, RefLock};
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
+use ruffle_render::bitmap::{PixelRegion, PixelSnapping};
 use ruffle_render::commands::Command as RenderCommand;
 use ruffle_render::commands::CommandHandler;
 use ruffle_render::quality::StageQuality;
@@ -1323,6 +1325,53 @@ impl<'gc> EditText<'gc> {
             drawing.render(context);
         }
 
+        if let LayoutContent::Image {
+            bitmap: Some(bitmap),
+            size,
+            spacing,
+            ..
+        } = lbox.content()
+        {
+            self.render_image(context, bitmap, (size.width(), size.height()), *spacing);
+        }
+
+        context.transform_stack.pop();
+    }
+
+    /// Render the bitmap of an `<img>`, scaled to `size`, inside its box
+    /// (the transform stack is at the box's corner, `spacing` is the space
+    /// the box leaves around the image).
+    fn render_image(
+        self,
+        context: &mut RenderContext<'_, 'gc>,
+        bitmap: &BitmapCharacter<'gc>,
+        (width, height): (Twips, Twips),
+        (hspace, vspace): (Twips, Twips),
+    ) {
+        let natural = bitmap.compressed().size();
+        if natural.width == 0 || natural.height == 0 {
+            return;
+        }
+        let Ok(handle) = bitmap.bitmap_handle(context.renderer) else {
+            return;
+        };
+
+        context.transform_stack.push(&Transform {
+            matrix: Matrix::create_box(
+                width.to_pixels() as f32 / natural.width as f32,
+                height.to_pixels() as f32 / natural.height as f32,
+                hspace,
+                vspace,
+            ),
+            ..Default::default()
+        });
+        context.commands.render_bitmap(
+            handle,
+            context.transform_stack.transform(),
+            true,
+            PixelSnapping::Auto,
+            PixelRegion::for_whole_size(natural.width, natural.height),
+        );
         context.transform_stack.pop();
     }
 
@@ -2245,7 +2294,7 @@ impl<'gc> EditText<'gc> {
                     first_format = Some(text_format);
                     break;
                 }
-                LayoutContent::Drawing { .. } => {}
+                LayoutContent::Image { .. } | LayoutContent::Drawing { .. } => {}
             }
         }
 

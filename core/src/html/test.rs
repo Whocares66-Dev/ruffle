@@ -931,3 +931,27 @@ fn formatspans_replace_text_degenerate() {
     assert_eq!((0, 1), fs.get_span_boundaries(0, 5));
     assert_eq!((1, 2), fs.get_span_boundaries(5, 9));
 }
+
+#[test]
+fn formatspans_html_img_attributes() {
+    use crate::html::text_format::TextSpanImageAlign;
+
+    let fs = FormatSpans::from_html(
+        WStr::from_units(b"5<img src='ico_gold' align='baseline' width='4' vspace='-10' hspace='3'/>"),
+        TextFormat::default(),
+        None,
+        false,
+        false,
+        8,
+    );
+    let image = fs
+        .iter_spans()
+        .find_map(|(_, _, _, span)| span.image.as_ref())
+        .expect("the img tag makes a span with an image");
+    assert_eq!(image.src, WString::from_utf8("ico_gold"));
+    assert_eq!(image.align, Some(TextSpanImageAlign::Baseline));
+    assert_eq!(image.width, Some(4.0));
+    assert_eq!(image.height, None);
+    assert_eq!(image.vspace, Some(-10.0));
+    assert_eq!(image.hspace, Some(3.0));
+}

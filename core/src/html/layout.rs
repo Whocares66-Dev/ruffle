@@ -1,15 +1,16 @@
 //! Layout box structure
 pub mod context;
 
+use crate::character::BitmapCharacter;
 use crate::drawing::Drawing;
 use crate::font::{DefaultFont, EvalParameters, Font, FontLike, FontSet, FontType};
 use crate::html::dimensions::{BoxBounds, Position, Size};
 use crate::html::layout::context::LayoutContext;
-use crate::html::text_format::{FormatSpans, TextFormat, TextSpan};
+use crate::html::text_format::{FormatSpans, TextFormat, TextSpan, TextSpanImage};
 use crate::html::wrap_line;
 use crate::string::WStr;
 use crate::tag_utils::SwfMovie;
-use gc_arena::Collect;
+use gc_arena::{Collect, Gc};
 use std::cmp::{Ordering, max, min};
 use std::fmt::{Debug, Formatter};
 use std::mem;
@@ -107,6 +108,10 @@ pub struct LayoutBuilder<'a, 'gc> {
     /// The right margin of the first span in the current line.
     current_line_span: TextSpan,
 
+    /// Whether `current_line_span` is the placeholder span of an image that
+    /// began the line (see [`Self::newspan`]).
+    line_span_is_image: bool,
+
     /// The total width of the text field being laid out.
     max_bounds: Twips,
 }
@@ -136,6 +141,7 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
             is_first_line: true,
             has_line_break: false,
             current_line_span: Default::default(),
+            line_span_is_image: false,
             max_bounds,
             is_input: params.is_input,
             is_word_wrap: params.is_word_wrap,
@@ -152,6 +158,12 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
     fn lay_out_span(&mut self, span_start: usize, span_text: &'a WStr, span: &TextSpan) {
         let font_set = self.resolve_font(span);
         self.font_set = Some(font_set);
+
+        if let Some(image) = &span.image {
+            self.lay_out_image(span_start, span, image);
+            return;
+        }
+
         self.newspan(span);
 
         let params = EvalParameters::from_span(span);
@@ -301,14 +313,16 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
         let mut line_size_bounds = None;
         let mut box_count: i32 = 0;
         for linebox in self.boxes.iter_mut() {
-            let (text, _tf, font_set, params) =
-                linebox.as_renderable_text(self.text).expect("text");
-
-            // Flash ignores trailing spaces when aligning lines, so should we
-            if self.movie.version() >= 8 && self.current_line_span.align != swf::TextAlign::Left {
-                linebox.bounds = linebox
-                    .bounds
-                    .with_width(font_set.measure(text.trim_end(), params));
+            // An image takes up its whole box; only text has trailing spaces.
+            if let Some((text, _tf, font_set, params)) = linebox.as_renderable_text(self.text) {
+                // Flash ignores trailing spaces when aligning lines, so should we
+                if self.movie.version() >= 8
+                    && self.current_line_span.align != swf::TextAlign::Left
+                {
+                    linebox.bounds = linebox
+                        .bounds
+                        .with_width(font_set.measure(text.trim_end(), params));
+                }
             }
 
             Self::extend_bounds(&mut line_size_bounds, linebox.bounds);
@@ -349,7 +363,7 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
 
         box_count = 0;
         for layout_box in self.boxes.iter_mut() {
-            if layout_box.is_text_box() {
+            if layout_box.is_text_box() || layout_box.is_image() {
                 let position = Position::from((
                     left_adjustment + align_adjustment + (interim_adjustment * box_count),
                     baseline_adjustment,
@@ -392,7 +406,7 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
         let start = first_box.start();
         let bounds = boxes
             .iter()
-            .filter(|b| b.is_text_box())
+            .filter(|b| b.is_text_box() || b.is_image())
             .fold(first_box.bounds, |bounds, b| bounds + b.bounds);
 
         // Update last line's end position to take into account the delimiter.
@@ -496,11 +510,19 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
         let leading = Twips::from_pixels(first_span.leading);
         if self.is_start_of_line() {
             self.current_line_span = first_span.clone();
+            self.line_span_is_image = first_span.image.is_some();
             self.max_font_size = font_size;
             self.max_ascent = ascent;
             self.max_descent = descent;
             self.max_leading = leading;
         } else {
+            if self.line_span_is_image && first_span.image.is_none() {
+                // The span of an image says nothing of the text around it (its
+                // font size is a placeholder's): when the line began with an
+                // image, the first text after it stands for the line instead.
+                self.current_line_span = first_span.clone();
+                self.line_span_is_image = false;
+            }
             self.max_font_size = self.max_font_size.max(font_size);
             self.max_ascent = self.max_ascent.max(ascent);
             self.max_descent = self.max_descent.max(descent);
@@ -686,6 +708,79 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
         );
 
         self.cursor += (text_width, Twips::ZERO).into();
+        self.append_box(new_box);
+    }
+
+    /// Lay out an `<img>` of HTML text as Scaleform GFx does: a box in the
+    /// flow of the line, standing on the baseline, so the line grows to hold it.
+    ///
+    /// `hspace` and `vspace` are the space that surrounds the image, shared
+    /// between its two sides (the tooltips' header rule has `vspace="12"`, six
+    /// above it and six below). A negative value takes room from the line:
+    /// the coins of a money amount have `vspace="-10"`, which keeps a coin
+    /// taller than the digits from pushing them down.
+    ///
+    /// The image is the bitmap the movie exports as `src`; its size is the
+    /// `width` and `height` attributes, or the bitmap's own (when only one is
+    /// given, the other keeps the bitmap's proportions).
+    ///
+    /// TODO Flash Player floats an image with `align="left"` or `"right"`
+    /// beside the text instead of placing it in the line; those are laid out
+    /// in the line here too.
+    fn lay_out_image(&mut self, start: usize, span: &TextSpan, image: &TextSpanImage) {
+        let bitmap = self
+            .context
+            .get_bitmap_by_export_name(self.movie, &image.src);
+        let (natural_width, natural_height) = bitmap
+            .map(|bitmap| {
+                let size = bitmap.compressed().size();
+                (f64::from(size.width), f64::from(size.height))
+            })
+            .unwrap_or_default();
+
+        let valid = |value: Option<f64>| value.filter(|v| v.is_finite() && *v >= 0.0);
+        let (width, height) = match (valid(image.width), valid(image.height)) {
+            (Some(width), Some(height)) => (width, height),
+            (Some(width), None) if natural_width > 0.0 => {
+                (width, width * natural_height / natural_width)
+            }
+            (None, Some(height)) if natural_height > 0.0 => {
+                (height * natural_width / natural_height, height)
+            }
+            (width, height) => (
+                width.unwrap_or(natural_width),
+                height.unwrap_or(natural_height),
+            ),
+        };
+        let space = |value: Option<f64>| {
+            Twips::from_pixels(value.filter(|v| v.is_finite()).unwrap_or_default() / 2.0)
+        };
+        let hspace = space(image.hspace);
+        let vspace = space(image.vspace);
+        let size = Size::from((Twips::from_pixels(width), Twips::from_pixels(height)));
+        let outer_width = (size.width() + hspace * 2).max(Twips::ZERO);
+
+        // An image that does not fit in what is left of the line begins the next one.
+        if self.is_word_wrap && !self.is_start_of_line() {
+            let (line_width, offset) = self.wrap_dimensions(span);
+            if offset + outer_width > line_width {
+                self.newline(start, span, false);
+            }
+        }
+
+        // The box, with its space, stands on the baseline.
+        let height = (size.height() + vspace * 2).max(Twips::ZERO);
+
+        self.newspan(span);
+        self.max_ascent = self.max_ascent.max(height);
+
+        let mut new_box = LayoutBox::from_image(start, start + 1, bitmap, size, (hspace, vspace));
+        new_box.bounds = BoxBounds::from_position_and_size(
+            self.cursor - (Twips::ZERO, height).into(),
+            Size::from((outer_width, height)),
+        );
+
+        self.cursor += (outer_width, Twips::ZERO).into();
         self.append_box(new_box);
     }
 
@@ -1076,7 +1171,7 @@ pub struct LayoutBox<'gc> {
 
 /// Represents different content modes of a given `LayoutBox`.
 ///
-/// Currently, a `LayoutBox` can contain `Text`, `Bullet`s, or a `Drawing`.
+/// Currently, a `LayoutBox` can contain `Text`, `Bullet`s, an `Image`, or a `Drawing`.
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub enum LayoutContent<'gc> {
@@ -1143,6 +1238,28 @@ pub enum LayoutContent<'gc> {
         params: EvalParameters,
     },
 
+    /// A layout box containing the image of an `<img>` tag.
+    ///
+    /// The box's bounds hold the image with its `hspace` and `vspace` around it.
+    Image {
+        /// The start position of the image's placeholder character in the text (inclusive).
+        start: usize,
+
+        /// The end position of the placeholder character (exclusive).
+        end: usize,
+
+        /// The bitmap to draw, if the movie exports one under the tag's `src`.
+        bitmap: Option<Gc<'gc, BitmapCharacter<'gc>>>,
+
+        /// The size the bitmap is drawn at.
+        #[collect(require_static)]
+        size: Size<Twips>,
+
+        /// The horizontal and vertical space on each side of the image.
+        #[collect(require_static)]
+        spacing: (Twips, Twips),
+    },
+
     /// A layout box containing a drawing.
     ///
     /// The drawing will be rendered with its origin at the position of the
@@ -1168,6 +1285,11 @@ impl Debug for LayoutContent<'_> {
             LayoutContent::Bullet { position, .. } => f
                 .debug_struct("Bullet")
                 .field("position", position)
+                .finish(),
+            LayoutContent::Image { start, end, .. } => f
+                .debug_struct("Image")
+                .field("start", start)
+                .field("end", end)
                 .finish(),
             LayoutContent::Drawing { position, .. } => f
                 .debug_struct("Drawing")
@@ -1219,6 +1341,27 @@ impl<'gc> LayoutBox<'gc> {
                 text_format: span.get_text_format(),
                 font_set,
                 params,
+            },
+            last_in_line: false,
+        }
+    }
+
+    /// Construct an image box for an `<img>` tag.
+    pub fn from_image(
+        start: usize,
+        end: usize,
+        bitmap: Option<Gc<'gc, BitmapCharacter<'gc>>>,
+        size: Size<Twips>,
+        spacing: (Twips, Twips),
+    ) -> Self {
+        Self {
+            bounds: Default::default(),
+            content: LayoutContent::Image {
+                start,
+                end,
+                bitmap,
+                size,
+                spacing,
             },
             last_in_line: false,
         }
@@ -1285,7 +1428,7 @@ impl<'gc> LayoutBox<'gc> {
                 *font_set,
                 *params,
             )),
-            LayoutContent::Drawing { .. } => None,
+            LayoutContent::Image { .. } | LayoutContent::Drawing { .. } => None,
         }
     }
 
@@ -1294,6 +1437,7 @@ impl<'gc> LayoutBox<'gc> {
         match &self.content {
             LayoutContent::Text { .. } => None,
             LayoutContent::Bullet { .. } => None,
+            LayoutContent::Image { .. } => None,
             LayoutContent::Drawing { drawing, .. } => Some(drawing),
         }
     }
@@ -1306,13 +1450,17 @@ impl<'gc> LayoutBox<'gc> {
         matches!(&self.content, LayoutContent::Bullet { .. })
     }
 
+    pub fn is_image(&self) -> bool {
+        matches!(&self.content, LayoutContent::Image { .. })
+    }
+
     pub fn is_last_in_line(&self) -> bool {
         self.last_in_line
     }
 
     pub fn start(&self) -> usize {
         match &self.content {
-            LayoutContent::Text { start, .. } => *start,
+            LayoutContent::Text { start, .. } | LayoutContent::Image { start, .. } => *start,
             LayoutContent::Bullet { position, .. } => *position,
             LayoutContent::Drawing { position, .. } => *position,
         }
@@ -1320,7 +1468,7 @@ impl<'gc> LayoutBox<'gc> {
 
     pub fn end(&self) -> usize {
         match &self.content {
-            LayoutContent::Text { end, .. } => *end,
+            LayoutContent::Text { end, .. } | LayoutContent::Image { end, .. } => *end,
             LayoutContent::Bullet { position, .. } => *position,
             LayoutContent::Drawing { position, .. } => *position,
         }
@@ -1342,6 +1490,13 @@ impl<'gc> LayoutBox<'gc> {
     /// Return x-axis char bounds of the given char relative to the whole layout.
     pub fn char_x_bounds(&self, position: usize) -> Option<(Twips, Twips)> {
         let relative_position = position.checked_sub(self.start())?;
+
+        // The placeholder character of an image is the whole box.
+        if let LayoutContent::Image { .. } = &self.content {
+            let origin_x = self.bounds().origin().x();
+            return (relative_position == 0)
+                .then(|| (origin_x, origin_x + self.bounds().width()));
+        }
 
         let LayoutContent::Text { char_end_pos, .. } = &self.content else {
             return None;

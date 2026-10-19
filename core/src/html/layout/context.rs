@@ -1,7 +1,9 @@
+use crate::character::{BitmapCharacter, Character};
 use crate::context::{RenderContext, UpdateContext};
 use crate::font::{DefaultFont, Font, FontType};
-use gc_arena::Mutation;
+use gc_arena::{Gc, Mutation};
 use ruffle_common::tag_utils::SwfMovie;
+use ruffle_wstr::WStr;
 
 /// Provides access to the font resolution operations needed to lay out text,
 /// common to both `UpdateContext` and `RenderContext`.
@@ -30,6 +32,26 @@ pub trait LayoutContext<'gc> {
         is_bold: bool,
         is_italic: bool,
     ) -> Vec<Font<'gc>>;
+
+    /// Find the bitmap a movie exports under the given linkage name, for an
+    /// `<img src="...">` in HTML text.
+    fn get_bitmap_by_export_name(
+        &self,
+        movie: SwfMovie<'gc>,
+        name: &WStr,
+    ) -> Option<Gc<'gc, BitmapCharacter<'gc>>>;
+}
+
+/// The bitmap exported by `movie` as `name`, if it is one.
+fn bitmap_by_export_name<'gc>(
+    library: &crate::library::Library<'gc>,
+    movie: SwfMovie<'gc>,
+    name: &WStr,
+) -> Option<Gc<'gc, BitmapCharacter<'gc>>> {
+    match library.library_for_movie(movie)?.character_by_export_name(name)? {
+        (_, Character::Bitmap(bitmap)) => Some(bitmap),
+        _ => None,
+    }
 }
 
 impl<'gc> LayoutContext<'gc> for UpdateContext<'gc> {
@@ -81,6 +103,14 @@ impl<'gc> LayoutContext<'gc> for UpdateContext<'gc> {
             self.gc_context,
         )
     }
+
+    fn get_bitmap_by_export_name(
+        &self,
+        movie: SwfMovie<'gc>,
+        name: &WStr,
+    ) -> Option<Gc<'gc, BitmapCharacter<'gc>>> {
+        bitmap_by_export_name(self.library, movie, name)
+    }
 }
 
 impl<'gc> LayoutContext<'gc> for RenderContext<'_, 'gc> {
@@ -131,5 +161,13 @@ impl<'gc> LayoutContext<'gc> for RenderContext<'_, 'gc> {
             self.renderer,
             self.gc_context,
         )
+    }
+
+    fn get_bitmap_by_export_name(
+        &self,
+        movie: SwfMovie<'gc>,
+        name: &WStr,
+    ) -> Option<Gc<'gc, BitmapCharacter<'gc>>> {
+        bitmap_by_export_name(self.library, movie, name)
     }
 }
