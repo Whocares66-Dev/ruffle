@@ -141,6 +141,7 @@ pub fn method<'gc>(
                     clip.set_color_transform((*color_transform).clone().into());
                     clip.invalidate_cached_bitmap();
                     clip.set_transformed_by_script(true);
+                    clip.set_color_transformed_by_script(true);
                 }
             }
             Value::Undefined

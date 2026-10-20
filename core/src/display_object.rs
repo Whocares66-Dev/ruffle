@@ -656,6 +656,7 @@ impl<'gc> DisplayObjectBase<'gc> {
 
     fn set_alpha(&self, value: f64) -> bool {
         self.set_transformed_by_script(true);
+        self.set_color_transformed_by_script(true);
         let value = Fixed8::from_f64(value);
         let mut tf = self.color_transform.get();
         let changed = tf.a_multiply != value;
@@ -795,6 +796,14 @@ impl<'gc> DisplayObjectBase<'gc> {
 
     fn set_transformed_by_script(&self, value: bool) {
         self.set_flag(DisplayObjectFlags::TRANSFORMED_BY_SCRIPT, value);
+    }
+
+    fn color_transformed_by_script(&self) -> bool {
+        self.contains_flag(DisplayObjectFlags::COLOR_TRANSFORMED_BY_SCRIPT)
+    }
+
+    fn set_color_transformed_by_script(&self, value: bool) {
+        self.set_flag(DisplayObjectFlags::COLOR_TRANSFORMED_BY_SCRIPT, value);
     }
 
     fn placed_by_avm1_script(&self) -> bool {
@@ -2240,6 +2249,17 @@ pub trait TDisplayObject<'gc>:
         self.base().set_transformed_by_script(value)
     }
 
+    /// Whether ActionScript has set this display object's color transform or alpha.
+    #[no_dynamic]
+    fn color_transformed_by_script(self) -> bool {
+        self.base().color_transformed_by_script()
+    }
+
+    #[no_dynamic]
+    fn set_color_transformed_by_script(self, value: bool) {
+        self.base().set_color_transformed_by_script(value)
+    }
+
     /// Whether this display object prefers to be cached into a bitmap rendering.
     /// This is the PlaceObject `cacheAsBitmap` flag - and may be overridden if filters are applied.
     /// Consider `is_bitmap_cached` for if a bitmap cache is actually in use.
@@ -2563,19 +2583,24 @@ pub trait TDisplayObject<'gc>:
 
     #[no_dynamic]
     fn apply_place_object(self, context: &mut UpdateContext<'gc>, place_object: &swf::PlaceObject) {
-        // PlaceObject tags only apply if this object has not been dynamically moved by AS code.
+        // A color transform applies unless AS code has set the color transform: where it moved the object only, as Scaleform's
+        // movies have it (the area map's picture is placed at alpha 0 by the timeline, scaled by its script, and shown by a
+        // later frame's color transform).
+        if !self.color_transformed_by_script()
+            && let Some(color_transform) = &place_object.color_transform
+        {
+            self.set_color_transform(*color_transform);
+            if let Some(parent) = self.parent() {
+                parent.invalidate_cached_bitmap();
+            }
+        }
+        // The rest of a PlaceObject tag only applies if this object has not been dynamically moved by AS code.
         if !self.transformed_by_script() {
             if let Some(matrix) = place_object.matrix {
                 self.set_matrix(matrix.into());
                 if let Some(parent) = self.parent() {
                     // Self-transform changes are automatically handled,
                     // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                    parent.invalidate_cached_bitmap();
-                }
-            }
-            if let Some(color_transform) = &place_object.color_transform {
-                self.set_color_transform(*color_transform);
-                if let Some(parent) = self.parent() {
                     parent.invalidate_cached_bitmap();
                 }
             }
@@ -3065,6 +3090,10 @@ bitflags! {
         /// (they need to be instantiated "manually" by
         /// `Sprite.constructChildren`).
         const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
+
+        /// Whether this object's color transform (or alpha) has been set by ActionScript. A timeline's color transform is
+        /// applied, though its matrix is not, where only the matrix was (`TRANSFORMED_BY_SCRIPT` without this).
+        const COLOR_TRANSFORMED_BY_SCRIPT = 1 << 17;
     }
 }
 
