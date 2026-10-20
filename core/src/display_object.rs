@@ -1156,7 +1156,17 @@ pub fn render_base<'gc>(
         apply_standard_mask_and_scroll(
             this,
             context,
-            |context| this.render_self(context),
+            |context| {
+                let pieces = if options.apply_transform {
+                    scale9_pieces(this)
+                } else {
+                    None
+                };
+                match pieces {
+                    Some((xs, ys)) => render_scale9(this, context, &xs, &ys),
+                    None => this.render_self(context),
+                }
+            },
             &options,
         );
     }
@@ -1183,6 +1193,144 @@ pub fn render_base<'gc>(
 
     if options.apply_transform {
         context.transform_stack.pop();
+    }
+}
+
+/// One piece of a 9-slice scaled object along one axis: the object's own coordinates `lo..hi` (twips) are drawn through
+/// `x * scale + offset`, in place of the object's own scale (the correction applied before its matrix).
+#[derive(Clone, Copy, Debug)]
+struct Scale9Piece {
+    lo: f64,
+    hi: f64,
+    scale: f64,
+    offset: f64,
+}
+
+/// How far the outermost pieces reach beyond the grid, so that nothing is clipped away (twips).
+const SCALE9_REACH: f64 = 1.0e6;
+
+/// The pieces of one axis of a 9-slice grid. `x0..x1` are the object's bounds, `g0..g1` its grid, `s` its scale on this axis.
+/// The outer pieces keep their size in the parent's space; the middle takes the rest.
+fn scale9_axis(x0: f64, x1: f64, g0: f64, g1: f64, s: f64) -> Vec<Scale9Piece> {
+    let whole = vec![Scale9Piece {
+        lo: -SCALE9_REACH,
+        hi: SCALE9_REACH,
+        scale: 1.0,
+        offset: 0.0,
+    }];
+    let (g0, g1) = (g0.clamp(x0, x1), g1.clamp(x0, x1));
+    let (left, right, middle) = (g0 - x0, x1 - g1, g1 - g0);
+    let target = (x1 - x0) * s;
+    // The corners alone are larger than the target, or there is nothing to stretch: scale all of it alike.
+    if middle <= 0.0 || target <= left + right || (s - 1.0).abs() < 1e-6 {
+        return whole;
+    }
+    let k = (target - left - right) / middle;
+    let mid_start = x0 * s + left;
+    vec![
+        Scale9Piece {
+            lo: -SCALE9_REACH,
+            hi: g0,
+            scale: 1.0 / s,
+            offset: x0 - x0 / s,
+        },
+        Scale9Piece {
+            lo: g0,
+            hi: g1,
+            scale: k / s,
+            offset: (mid_start - g0 * k) / s,
+        },
+        Scale9Piece {
+            lo: g1,
+            hi: SCALE9_REACH,
+            scale: 1.0 / s,
+            offset: x1 - x1 / s,
+        },
+    ]
+}
+
+/// The 9-slice pieces of an object with a scaling grid (`DefineScalingGrid`, `scale9Grid`), if it is to be drawn by pieces:
+/// its own matrix must only scale (Flash draws a rotated or skewed object whole).
+fn scale9_pieces(this: DisplayObject<'_>) -> Option<(Vec<Scale9Piece>, Vec<Scale9Piece>)> {
+    let grid = this.scaling_grid();
+    if grid.width() <= Twips::ZERO || grid.height() <= Twips::ZERO {
+        return None;
+    }
+    let matrix = this.base().matrix();
+    if matrix.b != 0.0 || matrix.c != 0.0 || matrix.a <= 0.0 || matrix.d <= 0.0 {
+        return None;
+    }
+    if matrix.a == 1.0 && matrix.d == 1.0 {
+        return None;
+    }
+    let bounds = this.bounds(BoundsMode::Engine);
+    if !bounds.is_valid() {
+        return None;
+    }
+    let f = |t: Twips| t.get() as f64;
+    let xs = scale9_axis(
+        f(bounds.x_min),
+        f(bounds.x_max),
+        f(grid.x_min),
+        f(grid.x_max),
+        matrix.a as f64,
+    );
+    let ys = scale9_axis(
+        f(bounds.y_min),
+        f(bounds.y_max),
+        f(grid.y_min),
+        f(grid.y_max),
+        matrix.d as f64,
+    );
+    // Nothing to cut: drawn whole.
+    if xs.len() == 1 && ys.len() == 1 {
+        return None;
+    }
+    Some((xs, ys))
+}
+
+/// Draws an object with a scaling grid once per piece, each through its own matrix and clipped to its piece, so that the
+/// corners keep their size and the edges and middle stretch (Flash's and Scaleform's 9-slice scaling). What the object
+/// draws, vector fills and bitmap fills alike, is cut by the grid.
+fn render_scale9<'gc>(
+    this: DisplayObject<'gc>,
+    context: &mut RenderContext<'_, 'gc>,
+    xs: &[Scale9Piece],
+    ys: &[Scale9Piece],
+) {
+    let matrix = context.transform_stack.transform().matrix;
+    for y in ys {
+        for x in xs {
+            let clip = Rectangle {
+                x_min: Twips::new((x.lo * x.scale + x.offset).round() as i32),
+                x_max: Twips::new((x.hi * x.scale + x.offset).round() as i32),
+                y_min: Twips::new((y.lo * y.scale + y.offset).round() as i32),
+                y_max: Twips::new((y.hi * y.scale + y.offset).round() as i32),
+            };
+            let clip_matrix = matrix * Matrix::create_box_from_rectangle(&clip);
+            context.commands.push_mask();
+            context.commands.draw_rect(Color::WHITE, clip_matrix);
+            context.commands.activate_mask();
+
+            context.transform_stack.push(&Transform {
+                matrix: Matrix {
+                    a: x.scale as f32,
+                    d: y.scale as f32,
+                    tx: Twips::new(x.offset.round() as i32),
+                    ty: Twips::new(y.offset.round() as i32),
+                    ..Default::default()
+                },
+                color_transform: Default::default(),
+                perspective_projection: None,
+                tz: 0.0,
+            });
+            this.render_self(context);
+            context.transform_stack.pop();
+
+            context.commands.deactivate_mask();
+            context.commands.draw_rect(Color::WHITE, clip_matrix);
+            context.commands.pop_mask();
+        }
     }
 }
 
@@ -3329,5 +3477,36 @@ impl<'gc> DisplayObjectWeak<'gc> {
             DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
             DisplayObjectWeak::Bitmap(b) => b.upgrade(mc).map(|ld| ld.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod scale9_tests {
+    use super::scale9_axis;
+
+    /// Where a piece draws the object's coordinate `x`, in the parent's space, for an object scaled by `s`.
+    fn drawn(piece: &super::Scale9Piece, x: f64, s: f64) -> f64 {
+        (x * piece.scale + piece.offset) * s
+    }
+
+    #[test]
+    fn corners_keep_their_size_and_the_middle_stretches() {
+        // Bounds 0..1000, grid 100..900, scaled 3x: 3000 twips wide, corners stay 100.
+        let pieces = scale9_axis(0.0, 1000.0, 100.0, 900.0, 3.0);
+        assert_eq!(pieces.len(), 3);
+        assert!((drawn(&pieces[0], 0.0, 3.0) - 0.0).abs() < 1e-6);
+        assert!((drawn(&pieces[0], 100.0, 3.0) - 100.0).abs() < 1e-6);
+        assert!((drawn(&pieces[1], 100.0, 3.0) - 100.0).abs() < 1e-6);
+        assert!((drawn(&pieces[1], 900.0, 3.0) - 2900.0).abs() < 1e-6);
+        assert!((drawn(&pieces[2], 900.0, 3.0) - 2900.0).abs() < 1e-6);
+        assert!((drawn(&pieces[2], 1000.0, 3.0) - 3000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_target_smaller_than_the_corners_scales_alike() {
+        // 1000 twips scaled to 100: smaller than the two corners (200), so nothing is cut.
+        let pieces = scale9_axis(0.0, 1000.0, 100.0, 900.0, 0.1);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].scale, pieces[0].offset), (1.0, 0.0));
     }
 }
