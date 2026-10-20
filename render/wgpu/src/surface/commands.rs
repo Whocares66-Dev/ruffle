@@ -720,6 +720,16 @@ impl CommandHandler for WgpuCommandHandler<'_, '_> {
             self.nearest_layer
         };
         let blend_type = BlendType::from(blend_mode);
+        // An Alpha blend with no Layer above it has nothing to apply its alpha to, and used to be dropped altogether, so that
+        // the object never showed. Scaleform's movies (Dragon Age's area map, which sets `blendMode = "alpha"` on its picture
+        // inside a clip that is no layer) show the object as an ordinary one there: it is drawn normally. (An Erase with no
+        // Layer above it has nothing to erase and is still dropped, by `draw_commands`.)
+        let blend_type = match blend_type {
+            BlendType::Complex(ComplexBlend::Alpha) if matches!(self.nearest_layer, LayerRef::None) => {
+                BlendType::Trivial(TrivialBlend::Normal)
+            }
+            other => other,
+        };
         let clear_color = blend_type.default_color();
         let target = surface.draw_commands(
             RenderTargetMode::FreshWithColor(clear_color),
