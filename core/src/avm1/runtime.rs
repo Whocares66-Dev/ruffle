@@ -511,12 +511,37 @@ impl<'gc> Avm1<'gc> {
         // the SWF requests it.
         *context.frame_phase = FramePhase::Idle;
 
+        // Scaleform GFx's `_global.noInvisibleAdvance`: while it is true, a clip that is not visible, or is under one that is
+        // not, does not advance (its frames and its enterFrame wait until it is shown).
+        let no_invisible_advance = context.stage.root_clip().is_some_and(|root| {
+            let mut activation =
+                Activation::from_nothing(context, ActivationIdentifier::root("[noInvisibleAdvance]"), root);
+            let name = AvmString::new_utf8(activation.gc(), "noInvisibleAdvance");
+            let version = activation.swf_version();
+            activation
+                .global_object()
+                .get(name, &mut activation)
+                .is_ok_and(|v| v.as_bool(version))
+        });
+        let shown = |clip: MovieClip<'gc>| {
+            let mut at: Option<DisplayObject<'gc>> = Some(clip.into());
+            while let Some(o) = at {
+                if !o.visible() {
+                    return false;
+                }
+                at = o.parent();
+            }
+            true
+        };
+
         // AVM1 execution order is determined by the global execution list, based on instantiation order.
         let mut prev: Option<MovieClip<'gc>> = None;
         let mut next = context.avm1.clip_exec_list;
         while let Some(clip) = next {
             next = clip.next_avm1_clip();
-            if clip.avm1_removed() {
+            if !clip.avm1_removed() && no_invisible_advance && !shown(clip) {
+                prev = Some(clip);
+            } else if clip.avm1_removed() {
                 // Clean up removed clips from this frame or a previous frame.
                 if let Some(prev) = prev {
                     prev.set_next_avm1_clip(context.gc(), next);
