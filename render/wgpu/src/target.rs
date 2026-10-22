@@ -35,6 +35,20 @@ pub trait RenderTarget: Debug + 'static {
         command_buffers: I,
         frame: Self::Frame,
     ) -> wgpu::SubmissionIndex;
+
+    /// The picture a frame starts from and is drawn over (loaded, not cleared), as a Scaleform movie is drawn over
+    /// what is already in the back buffer and its blend modes act on that. It is the target's size; `None` clears the
+    /// frame to the stage's background colour, as Flash Player does.
+    fn backdrop(&self) -> Option<wgpu::Texture> {
+        None
+    }
+
+    /// Whether `submit` keeps the command buffers for its owner to submit later (after a frame drawn elsewhere, which
+    /// the backdrop is), rather than submitting them. The staging belt they were written through is then held until
+    /// [`crate::backend::WgpuRenderBackend::recall_staging`] says they have been submitted.
+    fn submits_later(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]

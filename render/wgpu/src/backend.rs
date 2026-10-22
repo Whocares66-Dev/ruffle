@@ -32,6 +32,7 @@ use ruffle_render::tessellator::ShapeTessellator;
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use swf::Color;
@@ -388,6 +389,12 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         &self.target
     }
 
+    /// For a target that submits later ([`RenderTarget::submits_later`]): the oldest `frames` frames it was handed
+    /// have been submitted (or dropped), so the staging belts they were written through can be used again.
+    pub fn recall_staging(&mut self, frames: usize) {
+        self.active_frame.recall_held(frames);
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         &self.descriptors.device
     }
@@ -643,14 +650,21 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.active_frame.maybe_flush(&self.descriptors);
         }
 
-        self.surface.draw_commands_and_copy_to(
-            frame_output.view(),
-            RenderTargetMode::FreshWithColor(wgpu::Color {
+        // Over the target's backdrop when it has one of the frame's size, else on the stage's colour.
+        let mode = match self.target.backdrop() {
+            Some(backdrop) if backdrop.size() == self.surface.size() => {
+                RenderTargetMode::FreshWithTexture(backdrop)
+            }
+            _ => RenderTargetMode::FreshWithColor(wgpu::Color {
                 r: f64::from(clear.r) / 255.0,
                 g: f64::from(clear.g) / 255.0,
                 b: f64::from(clear.b) / 255.0,
                 a: f64::from(clear.a) / 255.0,
             }),
+        };
+        self.surface.draw_commands_and_copy_to(
+            frame_output.view(),
+            mode,
             &self.descriptors,
             &mut self.active_frame.staging_belt,
             &self.dynamic_transforms,
@@ -1276,6 +1290,10 @@ pub struct ActiveFrame {
     pub staging_belt: wgpu::util::StagingBelt,
     pub command_encoder: wgpu::CommandEncoder,
     draws_since_flush: u32,
+    /// The belts of frames handed to a target that submits later, oldest first, not yet recalled.
+    held_belts: VecDeque<wgpu::util::StagingBelt>,
+    /// Belts recalled, to be used again.
+    spare_belts: Vec<wgpu::util::StagingBelt>,
 }
 
 impl ActiveFrame {
@@ -1288,6 +1306,8 @@ impl ActiveFrame {
                 .create_command_encoder(&Default::default()),
             staging_belt: wgpu::util::StagingBelt::new(descriptors.device.clone(), 65536),
             draws_since_flush: 0,
+            held_belts: VecDeque::new(),
+            spare_belts: Vec::new(),
         }
     }
 
@@ -1311,8 +1331,30 @@ impl ActiveFrame {
             Some(draw_encoder.finish()),
             frame,
         );
-        self.staging_belt.recall();
+        if target.submits_later() {
+            // A belt's buffers are mapped again when it is recalled, and a mapped buffer cannot be in a submission:
+            // this frame's belt waits for its command buffers to be submitted, and the next frame takes another.
+            let next = self
+                .spare_belts
+                .pop()
+                .unwrap_or_else(|| wgpu::util::StagingBelt::new(descriptors.device.clone(), 65536));
+            self.held_belts
+                .push_back(std::mem::replace(&mut self.staging_belt, next));
+        } else {
+            self.staging_belt.recall();
+        }
         index
+    }
+
+    /// The belts of the oldest `frames` frames held, their command buffers having been submitted, recalled.
+    pub fn recall_held(&mut self, frames: usize) {
+        for _ in 0..frames {
+            let Some(mut belt) = self.held_belts.pop_front() else {
+                break;
+            };
+            belt.recall();
+            self.spare_belts.push(belt);
+        }
     }
 
     pub fn submit_direct(&mut self, descriptors: &Descriptors) -> SubmissionIndex {
