@@ -399,6 +399,20 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         &self.descriptors.device
     }
 
+    /// A bitmap whose picture is `texture`, made on this backend's device by its host and drawn into by it: sampled
+    /// as stored (its default view), so an `Rgba8Unorm` texture holding premultiplied colour, as the bitmaps
+    /// [`RenderBackend::register_bitmap`] makes are.
+    pub fn register_texture(&self, texture: wgpu::Texture) -> BitmapHandle {
+        BitmapHandle(Arc::new(Texture {
+            texture,
+            repeating_linear: Default::default(),
+            repeating_nearest: Default::default(),
+            clamped_linear: Default::default(),
+            clamped_nearest: Default::default(),
+            copy_count: Cell::new(0),
+        }))
+    }
+
     pub fn make_queue_sync_handle(
         &self,
         target: TextureTarget,

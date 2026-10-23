@@ -2572,6 +2572,22 @@ impl Player {
         });
     }
 
+    /// Gives the root movie's bitmap exported as `name` the picture `handle` in place of its own (see
+    /// [`crate::character::BitmapCharacter::set_handle`]): false when the movie has no bitmap of that name, or it has
+    /// been drawn already.
+    pub fn set_bitmap_handle(&mut self, name: &str, handle: ruffle_render::bitmap::BitmapHandle) -> bool {
+        self.mutate_with_update_context(|context| {
+            let movie = *context.root_swf;
+            let Some(library) = context.library.library_for_movie(movie) else {
+                return false;
+            };
+            match library.character_by_export_name(&ruffle_wstr::WString::from_utf8(name)) {
+                Some((_, crate::character::Character::Bitmap(bitmap))) => bitmap.set_handle(handle),
+                _ => false,
+            }
+        })
+    }
+
     pub fn set_default_font(&mut self, font: DefaultFont, names: Vec<String>) {
         self.mutate_with_update_context(|context| {
             context.library.set_default_font(font, names);

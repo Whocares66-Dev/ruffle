@@ -79,6 +79,13 @@ impl<'gc> BitmapCharacter<'gc> {
         self.handle.set(new_handle.clone()).unwrap();
         Ok(new_handle)
     }
+
+    /// Gives the bitmap `handle` as its picture in place of its own, as a Scaleform host can give a movie's image
+    /// resource a texture of its own (a render target). The shapes that fill with the bitmap draw `handle` over the
+    /// bitmap's own size, whatever the texture's. Only before the bitmap is first drawn: false once it has a handle.
+    pub fn set_handle(&self, handle: BitmapHandle) -> bool {
+        self.handle.set(handle).is_ok()
+    }
 }
 
 /// Holds a bitmap from an SWF tag, plus the decoded width/height.
