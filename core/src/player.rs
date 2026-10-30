@@ -1576,11 +1576,14 @@ impl Player {
         // Determine the display object the mouse is hovering over.
         // Search through levels from top-to-bottom, returning the first display object that is under the mouse.
         let needs_render = self.mutate_with_update_context(|context| {
-            // Objects may be hovered using Tab,
-            // skip mouse hover when it's not necessary.
-            let mut skip_mouse_hover = !is_mouse_moved
-                && changed_mouse_buttons.is_empty()
-                && context.mouse_data.hovered.is_some();
+            // The hover is picked again at every update, the pointer still or not, as Scaleform GFx
+            // does: its Advance picks each mouse's topmost entity again at the mouse's last position
+            // when no event came for it (Dragon Age: Origins' GFxMovieRoot::Advance 0x00959590 ->
+            // 0x0094E6D0, 0x00958050), and the game's interface manager sends every movie a move
+            // each frame besides (0x00516760 -> 0x00515680 -> 0x00518860). So a list that scrolls
+            // under a still pointer rolls its rows over and out. Flash Player's Tab hover, which this
+            // pick undoes (upstream skipped it while the mouse was idle), is not GFx's.
+            let mut skip_mouse_hover = false;
 
             let new_over_object = if mouse_in_stage {
                 run_mouse_pick(context, true)

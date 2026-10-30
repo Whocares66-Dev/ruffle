@@ -10,7 +10,7 @@ Click as much as you like then move back onto the green O
 Click
 Move outside the green O
 FAILED: expected: 2 obtained: 7 [DefineTextTest.c:161] 
-FAILED: expected: 4 obtained: 6 [DefineTextTest.c:162] 
-#passed: 4
-#failed: 2
+PASSED: _global.mouseInOut  ==  4 [DefineTextTest.c:162]
+#passed: 5
+#failed: 1
 #total tests run: 6

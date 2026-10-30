@@ -1,1 +1,4 @@
 num_ticks = 1
+# Flash Player keeps the hover a Tab gave while the pointer is still; this fork picks the hover again at every
+# update, the pointer still or not, as Scaleform GFx does (player.rs, update_mouse_state).
+known_failure = true
