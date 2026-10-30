@@ -2696,6 +2696,9 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                 return false;
             }
 
+            // What the clip holds is tested where it is drawn: through its scaling grid, if it has one.
+            let point = super::scale9_content_point(self.into(), point);
+
             if !options.contains(HitTestOptions::SKIP_CHILDREN) {
                 let mut clip_depth = 0;
 
@@ -3054,6 +3057,8 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             }
 
             let local_matrix = self.global_to_local_matrix()?;
+            // What the clip holds is picked where it is drawn: through its scaling grid, if it has one.
+            let point = super::scale9_content_point(self.into(), point);
 
             // Maybe we could skip recursing down at all if !world_bounds.contains(point),
             // but a child button can have an invisible hit area outside the parent's bounds.

@@ -1289,6 +1289,51 @@ fn scale9_pieces(this: DisplayObject<'_>) -> Option<(Vec<Scale9Piece>, Vec<Scale
     Some((xs, ys))
 }
 
+/// The object's own coordinate drawn at `v` by the pieces of one axis: the piece whose drawn span holds `v`, taken back.
+fn scale9_axis_undo(pieces: &[Scale9Piece], v: f64) -> f64 {
+    pieces
+        .iter()
+        .find(|p| v < p.hi * p.scale + p.offset)
+        .or(pieces.last())
+        .map_or(v, |p| (v - p.offset) / p.scale)
+}
+
+/// The stage point a hit test of what an object with a scaling grid holds (its own drawing and its children, at any
+/// depth) is made at, for a point of the stage as drawn: the point taken back through the grid's pieces, so that the
+/// unscaled matrices of what it holds find what is drawn there. Scaleform GFx tests a shape under a clip with a grid
+/// through the grid (DAOrigins.exe: the shape point tests 0x0094C540 and 0x0094C720 take the nearest ancestor's grid,
+/// 0x0097B7A0, as their drawing does), and a movie relies on it: a scrollbar track stretched by its grid keeps its
+/// hit area's ends where the track's are. An object drawn whole gives the point unchanged.
+pub(crate) fn scale9_content_point(this: DisplayObject<'_>, global: Point<Twips>) -> Point<Twips> {
+    let Some((xs, ys)) = scale9_pieces(this) else {
+        return global;
+    };
+    let to_global = this.local_to_global_matrix();
+    let Some(to_local) = to_global.inverse() else {
+        return global;
+    };
+    let drawn = to_local * global;
+    let content = Point::new(
+        Twips::new(scale9_axis_undo(&xs, drawn.x.get() as f64).round() as i32),
+        Twips::new(scale9_axis_undo(&ys, drawn.y.get() as f64).round() as i32),
+    );
+    to_global * content
+}
+
+/// A stage point as drawn, taken back through the scaling grids of the object's ancestors, outermost first: the point a
+/// hit test of the object itself is made at when it is not reached by the hit test of its parent (a script's `hitTest`).
+pub(crate) fn scale9_hit_point(this: DisplayObject<'_>, global: Point<Twips>) -> Point<Twips> {
+    let mut ancestors = Vec::new();
+    let mut node = this.parent();
+    while let Some(parent) = node {
+        ancestors.push(parent);
+        node = parent.parent();
+    }
+    ancestors.into_iter().rev().fold(global, |point, ancestor| {
+        scale9_content_point(ancestor, point)
+    })
+}
+
 /// Draws an object with a scaling grid once per piece, each through its own matrix and clipped to its piece, so that the
 /// corners keep their size and the edges and middle stretch (Flash's and Scaleform's 9-slice scaling). What the object
 /// draws, vector fills and bitmap fills alike, is cut by the grid.
@@ -3500,6 +3545,20 @@ mod scale9_tests {
         assert!((drawn(&pieces[1], 900.0, 3.0) - 2900.0).abs() < 1e-6);
         assert!((drawn(&pieces[2], 900.0, 3.0) - 2900.0).abs() < 1e-6);
         assert!((drawn(&pieces[2], 1000.0, 3.0) - 3000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_drawn_point_goes_back_to_the_coordinate_drawn_there() {
+        // As above; a point is undone in the object's space before its own scale, where the pieces draw.
+        let pieces = scale9_axis(0.0, 1000.0, 100.0, 900.0, 3.0);
+        for x in [0.0, 50.0, 100.0, 500.0, 900.0, 950.0, 1000.0] {
+            let piece = pieces.iter().find(|p| x >= p.lo && x <= p.hi).unwrap();
+            let v = x * piece.scale + piece.offset;
+            assert!(
+                (super::scale9_axis_undo(&pieces, v) - x).abs() < 1e-6,
+                "{x}"
+            );
+        }
     }
 
     #[test]

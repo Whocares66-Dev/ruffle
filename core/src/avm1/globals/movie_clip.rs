@@ -244,6 +244,8 @@ pub fn hit_test<'gc>(
             // root can be moved via _root._x etc., so we actually have to transform from root to world space.
             let local = Point::from_pixels(x, y);
             let point = movie_clip.avm1_root_no_lock().local_to_global(local);
+            // Where the clip is drawn: through the scaling grids of the clips it is in.
+            let point = crate::display_object::scale9_hit_point(movie_clip.into(), point);
             let ret = if shape {
                 movie_clip.hit_test_shape(activation.context, point, HitTestOptions::AVM_HIT_TEST)
             } else {
