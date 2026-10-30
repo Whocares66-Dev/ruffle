@@ -1,1 +1,4 @@
 num_ticks = 1
+# Flash Player rolls the hover out when a press takes the focus; this fork keeps it, as Scaleform GFx does
+# (focus_tracker.rs, set_by_mouse).
+known_failure = true

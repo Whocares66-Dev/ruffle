@@ -88,13 +88,13 @@ impl<'gc> FocusTracker<'gc> {
 
     /// Set the focus programmatically.
     pub fn set(&self, new: Option<InteractiveObject<'gc>>, context: &mut UpdateContext<'gc>) {
-        self.set_internal(new, context, false);
+        self.set_internal(new, context, false, true);
         self.update_edittext_selection();
     }
 
     /// Reset the focus programmatically.
     pub fn reset_focus(&self, context: &mut UpdateContext<'gc>) {
-        self.set_internal(None, context, true);
+        self.set_internal(None, context, true, true);
     }
 
     /// Set the focus and acknowledge that this change was caused by a pointer device.
@@ -122,7 +122,11 @@ impl<'gc> FocusTracker<'gc> {
         // but `None` will be used when setting the focus.
         let new = new.filter(|new| new.is_focusable_by_mouse(context));
 
-        self.set_internal(new, context, false);
+        // The pointer keeps its hover: the object under it is the mouse's to roll over and out
+        // (Scaleform GFx). Flash Player rolls the hover out here (avm1/focus_mouse_rollout), which
+        // cancels a press on a button whose rollOut ends the press (Dragon Age: Origins' PushButton)
+        // when the press also takes the focus from a text field.
+        self.set_internal(new, context, false, false);
     }
 
     /// Set the focus and acknowledge that this change was caused by a key.
@@ -137,7 +141,7 @@ impl<'gc> FocusTracker<'gc> {
             return;
         }
 
-        self.set_internal(new, context, true);
+        self.set_internal(new, context, true, true);
         self.update_edittext_selection();
     }
 
@@ -146,8 +150,11 @@ impl<'gc> FocusTracker<'gc> {
         new: Option<InteractiveObject<'gc>>,
         context: &mut UpdateContext<'gc>,
         run_actions: bool,
+        move_hover: bool,
     ) {
-        Self::roll_over(context, new);
+        if move_hover {
+            Self::roll_over(context, new);
+        }
 
         if run_actions {
             // The order of events in avm1/tab_ordering_events suggests that
