@@ -1096,11 +1096,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             &FilterSource::for_entire_texture(&target_texture.texture),
         )?;
 
-        let index = Some(self.active_frame.submit_for_target(
-            &self.descriptors,
-            &texture_target,
-            frame_output,
-        ));
+        let index =
+            self.active_frame
+                .submit_for_target(&self.descriptors, &texture_target, frame_output);
 
         let sync_handle = self.make_queue_sync_handle(
             texture_target,
@@ -1330,7 +1328,7 @@ impl ActiveFrame {
         descriptors: &Descriptors,
         target: &T,
         frame: T::Frame,
-    ) -> SubmissionIndex {
+    ) -> Option<SubmissionIndex> {
         self.draws_since_flush = 0;
         self.staging_belt.finish();
         let draw_encoder = std::mem::replace(

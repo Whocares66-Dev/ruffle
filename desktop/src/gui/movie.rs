@@ -258,8 +258,8 @@ impl RenderTarget for MovieView {
         queue: &wgpu::Queue,
         command_buffers: I,
         _frame: Self::Frame,
-    ) -> wgpu::SubmissionIndex {
-        queue.submit(command_buffers)
+    ) -> Option<wgpu::SubmissionIndex> {
+        Some(queue.submit(command_buffers))
     }
 }
 

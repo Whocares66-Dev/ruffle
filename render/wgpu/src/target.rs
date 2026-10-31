@@ -28,13 +28,16 @@ pub trait RenderTarget: Debug + 'static {
     /// may attempt to recreate the swap chain via [`RenderTarget::resize`].
     fn get_next_texture(&mut self) -> Option<Self::Frame>;
 
+    /// Submits the frame's command buffers, and gives the submission's index; `None` for a target that keeps them
+    /// for its owner to submit later ([`RenderTarget::submits_later`]): an empty submission made only for an index
+    /// costs a device's maintenance each frame.
     fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         command_buffers: I,
         frame: Self::Frame,
-    ) -> wgpu::SubmissionIndex;
+    ) -> Option<wgpu::SubmissionIndex>;
 
     /// The picture a frame starts from and is drawn over (loaded, not cleared), as a Scaleform movie is drawn over
     /// what is already in the back buffer and its blend modes act on that. It is the target's size; `None` clears the
@@ -174,10 +177,10 @@ impl RenderTarget for SwapChainTarget {
         queue: &wgpu::Queue,
         command_buffers: I,
         frame: Self::Frame,
-    ) -> wgpu::SubmissionIndex {
+    ) -> Option<wgpu::SubmissionIndex> {
         let index = queue.submit(command_buffers);
         queue.present(frame.texture);
-        index
+        Some(index)
     }
 }
 
@@ -318,8 +321,8 @@ impl RenderTarget for TextureTarget {
         queue: &wgpu::Queue,
         command_buffers: I,
         _frame: Self::Frame,
-    ) -> wgpu::SubmissionIndex {
-        if let Some(TextureBufferInfo { buffer, copy_area }) = &self.buffer {
+    ) -> Option<wgpu::SubmissionIndex> {
+        let index = if let Some(TextureBufferInfo { buffer, copy_area }) = &self.buffer {
             let label = create_debug_label!("Render target transfer encoder");
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: label.as_deref(),
@@ -353,6 +356,7 @@ impl RenderTarget for TextureTarget {
             queue.submit(command_buffers.into_iter().chain(Some(encoder.finish())))
         } else {
             queue.submit(command_buffers)
-        }
+        };
+        Some(index)
     }
 }
