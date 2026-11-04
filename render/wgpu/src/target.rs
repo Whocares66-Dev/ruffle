@@ -52,6 +52,12 @@ pub trait RenderTarget: Debug + 'static {
     fn submits_later(&self) -> bool {
         false
     }
+
+    /// Told before each frame is drawn (before [`RenderTarget::get_next_texture`]): whether the frame's commands
+    /// blend with what is under them other than by drawing over it (a blend mode that is not normal, anywhere in the
+    /// frame). A frame that does not has the same pixels drawn over a transparent backdrop and laid over the
+    /// backdrop afterwards, so a target can keep it between frames.
+    fn frame_needs_backdrop(&mut self, _needs: bool) {}
 }
 
 #[derive(Debug)]

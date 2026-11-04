@@ -725,7 +725,9 @@ impl CommandHandler for WgpuCommandHandler<'_, '_> {
         // inside a clip that is no layer) show the object as an ordinary one there: it is drawn normally. (An Erase with no
         // Layer above it has nothing to erase and is still dropped, by `draw_commands`.)
         let blend_type = match blend_type {
-            BlendType::Complex(ComplexBlend::Alpha) if matches!(self.nearest_layer, LayerRef::None) => {
+            BlendType::Complex(ComplexBlend::Alpha)
+                if matches!(self.nearest_layer, LayerRef::None) =>
+            {
                 BlendType::Trivial(TrivialBlend::Normal)
             }
             other => other,

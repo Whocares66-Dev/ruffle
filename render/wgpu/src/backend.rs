@@ -444,6 +444,26 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
     }
 }
 
+/// Whether a frame's commands blend with what is under them other than by drawing over it: a blend mode that is not
+/// normal (or layer) anywhere in them.
+fn needs_backdrop(commands: &CommandList) -> bool {
+    use crate::blend::{BlendType, TrivialBlend};
+    use ruffle_render::commands::Command;
+    commands.commands.iter().any(|command| match command {
+        Command::Blend(inner, mode) => {
+            !matches!(
+                BlendType::from(mode.clone()),
+                BlendType::Trivial(TrivialBlend::Normal)
+            ) || needs_backdrop(inner)
+        }
+        Command::RenderAlphaMask {
+            maskee_commands,
+            mask_commands,
+        } => needs_backdrop(maskee_commands) || needs_backdrop(mask_commands),
+        _ => false,
+    })
+}
+
 impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
         // Avoid panics from creating 0-sized framebuffers.
@@ -570,6 +590,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        self.target.frame_needs_backdrop(needs_backdrop(&commands));
         let Some(frame_output) = self.target.get_next_texture() else {
             // Attempt to recreate the swap chain in this case.
             self.target.resize(
