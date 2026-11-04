@@ -58,6 +58,12 @@ pub trait RenderTarget: Debug + 'static {
     /// frame). A frame that does not has the same pixels drawn over a transparent backdrop and laid over the
     /// backdrop afterwards, so a target can keep it between frames.
     fn frame_needs_backdrop(&mut self, _needs: bool) {}
+
+    /// Asked for a frame that draws what the last did: whether the target holds the last frame's picture still, so
+    /// that nothing need be drawn.
+    fn keeps_frame(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]

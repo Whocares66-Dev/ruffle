@@ -84,6 +84,12 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
     profiler: GpuProfiler,
+    /// The last frame's commands and their fingerprint, to tell a frame that draws what the last did.
+    last_frame: Option<(u64, CommandList)>,
+    /// A bitmap was drawn into since the last frame (`update_texture`), or the host gave the backend a texture it
+    /// draws into itself (`register_texture`): the commands naming it do not say what it holds.
+    bitmaps_changed: Cell<bool>,
+    host_textures: Cell<bool>,
 }
 
 impl WgpuRenderBackend<SwapChainTarget> {
@@ -281,6 +287,9 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             dynamic_transforms: transforms,
             active_frame,
             profiler,
+            last_frame: None,
+            bitmaps_changed: Cell::new(false),
+            host_textures: Cell::new(false),
         })
     }
 
@@ -403,6 +412,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
     /// as stored (its default view), so an `Rgba8Unorm` texture holding premultiplied colour, as the bitmaps
     /// [`RenderBackend::register_bitmap`] makes are.
     pub fn register_texture(&self, texture: wgpu::Texture) -> BitmapHandle {
+        self.host_textures.set(true);
         BitmapHandle(Arc::new(Texture {
             texture,
             repeating_linear: Default::default(),
@@ -590,6 +600,20 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // A frame that draws what the last did, into a target that keeps the last: nothing is drawn (the kept picture
+        // stands). `cache_entries` are bitmaps to be drawn, and a handle's picture can change under the same commands.
+        let fingerprint = commands.fingerprint();
+        let changed = !cache_entries.is_empty()
+            || self.bitmaps_changed.take()
+            || self.host_textures.get()
+            || fingerprint.is_none()
+            || self.last_frame.as_ref().map(|(f, _)| *f) != fingerprint;
+        if changed {
+            // The list is kept to keep its handles alive: an address is not another handle's while it is compared.
+            self.last_frame = fingerprint.map(|f| (f, commands.clone()));
+        } else if self.target.keeps_frame() {
+            return;
+        }
         self.target.frame_needs_backdrop(needs_backdrop(&commands));
         let Some(frame_output) = self.target.get_next_texture() else {
             // Attempt to recreate the swap chain in this case.
@@ -790,6 +814,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         bitmap: Bitmap<'_>,
         mut region: PixelRegion,
     ) -> Result<(), BitmapError> {
+        self.bitmaps_changed.set(true);
         if region.width() == 0 || region.height() == 0 {
             // Nothing to do. It's important to bail out now, as the
             // write_texture call panics when the source buffer is of zero size.

@@ -54,6 +54,109 @@ impl CommandList {
         Self::default()
     }
 
+    /// A fingerprint of what the list draws, for a host that keeps a picture while it does not change: shapes and
+    /// bitmaps by their handles' identity (the host keeps the last list's handles alive, so an address is not reused
+    /// while it is compared), transforms by their numbers. `None` when something in it cannot be told (a perspective
+    /// projection, a 3D stage, a pixel bender blend): then it is taken to have changed.
+    pub fn fingerprint(&self) -> Option<u64> {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash_into(&mut hasher).then(|| hasher.finish())
+    }
+
+    fn hash_into(&self, h: &mut std::collections::hash_map::DefaultHasher) -> bool {
+        use std::hash::Hash;
+        fn matrix(h: &mut std::collections::hash_map::DefaultHasher, m: &Matrix) {
+            for v in [m.a, m.b, m.c, m.d] {
+                v.to_bits().hash(h);
+            }
+            m.tx.get().hash(h);
+            m.ty.get().hash(h);
+        }
+        fn transform(h: &mut std::collections::hash_map::DefaultHasher, t: &Transform) -> bool {
+            matrix(h, &t.matrix);
+            t.tz.to_bits().hash(h);
+            let c = &t.color_transform;
+            for v in [
+                c.r_multiply.get(),
+                c.g_multiply.get(),
+                c.b_multiply.get(),
+                c.a_multiply.get(),
+            ] {
+                v.hash(h);
+            }
+            for v in [c.r_add, c.g_add, c.b_add, c.a_add] {
+                v.hash(h);
+            }
+            t.perspective_projection.is_none()
+        }
+        fn color(h: &mut std::collections::hash_map::DefaultHasher, c: &Color) {
+            [c.r, c.g, c.b, c.a].hash(h);
+        }
+        self.commands.len().hash(h);
+        for command in &self.commands {
+            std::mem::discriminant(command).hash(h);
+            let known = match command {
+                Command::RenderBitmap {
+                    bitmap,
+                    transform: t,
+                    smoothing,
+                    pixel_snapping,
+                    region,
+                } => {
+                    (std::sync::Arc::as_ptr(&bitmap.0) as *const () as usize).hash(h);
+                    smoothing.hash(h);
+                    std::mem::discriminant(pixel_snapping).hash(h);
+                    [region.x_min, region.y_min, region.x_max, region.y_max].hash(h);
+                    transform(h, t)
+                }
+                Command::RenderStage3D { .. } => false,
+                Command::RenderShape {
+                    shape,
+                    transform: t,
+                } => {
+                    (std::sync::Arc::as_ptr(&shape.0) as *const () as usize).hash(h);
+                    transform(h, t)
+                }
+                Command::RenderAlphaMask {
+                    maskee_commands,
+                    mask_commands,
+                } => maskee_commands.hash_into(h) && mask_commands.hash_into(h),
+                Command::DrawRect {
+                    color: c,
+                    matrix: m,
+                }
+                | Command::DrawLine {
+                    color: c,
+                    matrix: m,
+                }
+                | Command::DrawLineRect {
+                    color: c,
+                    matrix: m,
+                } => {
+                    color(h, c);
+                    matrix(h, m);
+                    true
+                }
+                Command::PushMask
+                | Command::ActivateMask
+                | Command::DeactivateMask
+                | Command::PopMask => true,
+                Command::Blend(list, mode) => match mode {
+                    RenderBlendMode::Builtin(mode) => {
+                        std::mem::discriminant(mode).hash(h);
+                        list.hash_into(h)
+                    }
+                    RenderBlendMode::Shader(_) => false,
+                },
+            };
+            if !known {
+                return false;
+            }
+        }
+        true
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
