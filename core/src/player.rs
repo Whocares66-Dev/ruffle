@@ -378,6 +378,12 @@ pub struct Player {
     mouse_cursor: MouseCursor,
     mouse_cursor_needs_check: bool,
 
+    /// Whether something ran since the hover was last picked (a frame, a render's broadcast, a flush): the tick that ends
+    /// with it picked again. Dragon Age: Origins' `GFxMovieRoot::Advance` (0x00959590) picks the pointer's topmost entity again
+    /// for a mouse that had no event this call only when the movie ran frames in the call before (its byte +0x98C, set where
+    /// time advanced a frame and cleared at the end of the next call's loop), not at every call.
+    hover_stale: bool,
+
     system: SystemProperties,
 
     page_url: Option<String>,
@@ -609,9 +615,15 @@ impl Player {
         self.update_sockets();
         self.update_net_connections();
         self.update_timers(dt);
-        self.update(|context| {
+        // (Not `update`, which marks the hover stale: this call's stream bookkeeping runs nothing that moves it.)
+        self.update_with(false, |context| {
             StreamManager::tick(context, dt);
         });
+        // Once, for what ran in the tick, and not at all in a tick that ran nothing (a movie of 30 frames a second ticked at
+        // 60 has half its ticks so): the pick walks the display list and asks each clip's script for its button handlers.
+        if std::mem::take(&mut self.hover_stale) {
+            self.update_mouse_state(EnumSet::empty(), false, &mut false);
+        }
         self.audio.tick();
     }
 
@@ -1576,8 +1588,8 @@ impl Player {
         // Determine the display object the mouse is hovering over.
         // Search through levels from top-to-bottom, returning the first display object that is under the mouse.
         let needs_render = self.mutate_with_update_context(|context| {
-            // The hover is picked again at every update, the pointer still or not, as Scaleform GFx
-            // does: its Advance picks each mouse's topmost entity again at the mouse's last position
+            // The hover is picked again at the end of a tick that ran a frame or other update (`hover_stale`),
+            // the pointer still or not, as Scaleform GFx does: its Advance picks each mouse's topmost entity again at the mouse's last position
             // when no event came for it (Dragon Age: Origins' GFxMovieRoot::Advance 0x00959590 ->
             // 0x0094E6D0, 0x00958050), and the game's interface manager sends every movie a move
             // each frame besides (0x00516760 -> 0x00515680 -> 0x00518860). So a list that scrolls
@@ -2432,12 +2444,21 @@ impl Player {
     /// mouse hover node, AVM, and an update context.
     ///
     /// This particular function runs necessary post-update bookkeeping, such
-    /// as executing any actions queued on the update context, keeping the
-    /// hover state up to date, and running garbage collection.
+    /// as executing any actions queued on the update context, marking the
+    /// hover state to be picked again at the end of the tick, and running garbage collection.
     pub fn update<F, R>(&mut self, func: F) -> R
     where
         F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
     {
+        self.update_with(true, func)
+    }
+
+    /// [`Self::update`], leaving the hover as it was where `moves_hover` is false.
+    fn update_with<F, R>(&mut self, moves_hover: bool, func: F) -> R
+    where
+        F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
+    {
+        self.hover_stale |= moves_hover;
         let rval = self.mutate_with_update_context(|context| {
             let rval = func(context);
 
@@ -2446,11 +2467,11 @@ impl Player {
             rval
         });
 
-        // Update mouse state (check for new hovered button, etc.)
+        // Update mouse state (check for new hovered button, etc.): the drag now, the hover at the end of the tick
+        // (`hover_stale`).
         self.mutate_with_update_context(|context| {
             Self::update_drag(context);
         });
-        self.update_mouse_state(EnumSet::empty(), false, &mut false);
 
         // GC
         self.gc_arena.borrow_mut().collect_debt();
@@ -3126,6 +3147,7 @@ impl PlayerBuilder {
                 mouse_position: Point::ZERO,
                 mouse_cursor: MouseCursor::Arrow,
                 mouse_cursor_needs_check: false,
+                hover_stale: true,
 
                 // Misc. state
                 // TODO: AVM1 and AVM2 use separate RNGs (though algorithm is same), so this is technically incorrect.
